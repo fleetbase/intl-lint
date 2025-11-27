@@ -1,48 +1,23 @@
-/*
-===========================================================================
-               Internationalization Key Validation Script
-===========================================================================
-
-Script Purpose:
-----------------
-This Node.js script checks the usage of internationalization keys in your Ember project's JavaScript and Handlebars files. It ensures that all keys referenced in your project files are present in the specified YAML translation file. This helps prevent missing translations during runtime.
-
-Usage:
-------
-To use this script, run it with Node.js from the command line, providing the path to your Ember project directory and the path to the YAML translation file. Optionally, you can include the '--silent' flag to suppress error throwing and allow the script to run to completion even if there are missing translations.
-
-Example Command:
-----------------
-node index.js --silent
-
-Script Behavior:
-----------------
-1. The script recursively processes all JavaScript (.js) and Handlebars (.hbs) files in the specified Ember project directory.
-2. It extracts translation keys using regular expressions tailored for Handlebars and JavaScript files.
-3. For each key found, it checks if the key exists in the specified YAML translation file.
-4. If any missing keys are detected, the script logs them and optionally throws an error.
-
-Script Options:
----------------
-- Ember Project Path: The root directory of your Ember project. Modify the 'projectPath' variable to set the path.
-- Translation File Path: The path to the YAML translation file. Modify the 'translationFilePath' variable to set the path.
-- Silent Mode: Include the '--silent' flag to suppress error throwing and allow the script to run to completion even if there are missing translations.
-
-Authors:
----------
-- Fleetbase Pte Ltd <hello@fleetbase.io>
-- Ronald A. Richardson <ron@fleetbase.io>
-
-Contact:
----------
-If you encounter issues or have questions, feel free to contact the authors or raise an issue on the project repository.
-
-License:
---------
-This script is open-source and distributed under the MIT license. Refer to the LICENSE file for details.
-
-===========================================================================
-*/
+/**
+ * ===============================================================================
+ *                  Fleetbase Internationalization Linter
+ * ===============================================================================
+ * 
+ * Validates translation keys in Ember project files against YAML translation
+ * files to prevent missing translations at runtime.
+ * 
+ * Usage:
+ *   node index.js [options]
+ *   
+ * Options:
+ *   --silent, -s              Suppress errors and run to completion
+ *   --path, -p <path>         Path to Ember project (default: ./app)
+ *   --translation-path <path> Path to translation file (default: ./translations/en-us.yaml)
+ * 
+ * @copyright © 2024 Fleetbase Pte Ltd. All rights reserved.
+ * @license MIT
+ * ===============================================================================
+ */
 
 const fs = require('fs');
 const path = require('path');
@@ -55,6 +30,7 @@ const argv = yargs(hideBin(process.argv))
         alias: 's',
         type: 'boolean',
         description: 'Run in silent mode',
+        default: false,
     })
     .option('path', {
         alias: 'p',
@@ -68,127 +44,162 @@ const argv = yargs(hideBin(process.argv))
         default: './translations/en-us.yaml',
     }).argv;
 
-function findTranslationKeys(filePath) {
+/**
+ * Extract translation keys from file content
+ */
+function extractTranslationKeys(filePath) {
     const content = fs.readFileSync(filePath, 'utf8');
-
-    // Regular expression for finding translation keys
+    const keys = [];
     let regex;
+
     if (filePath.endsWith('.hbs')) {
-        // Regular expression for finding translation keys in Handlebars files
-        regex = /\{\{\s*t\s+["'`]([^"']+?)["'`]\s*}}|\(t\s+["'`]([^"']+?)["'`]\)/g;
+        // Handlebars: {{t "key"}} or (t "key")
+        regex = /\{\{\s*t\s+["'`]([^"'`]+?)["'`]\s*\}}|\(t\s+["'`]([^"'`]+?)["'`]\)/g;
     } else if (filePath.endsWith('.js')) {
-        // Regular expression for finding translation keys in JavaScript files
-        regex = /this\.intl\.t\s*\(\s*["'`]([^"']+?)["'`]\s*(?:,\s*\{.*?\}\s*)?\)/g;
+        // JavaScript: this.intl.t('key') or intl.t('key')
+        regex = /(?:this\.)?intl\.t\s*\(\s*["'`]([^"'`]+?)["'`]\s*(?:,\s*\{[^}]*\}\s*)?\)/g;
     } else {
-        console.log(`Unsupported file type: ${filePath}`);
-        return [];
+        return keys;
     }
 
-    const keys = [];
     let match;
-
     while ((match = regex.exec(content)) !== null) {
-        // Matched key will be in one of the capturing groups 1 or 2
         const key = match[1] || match[2];
-        if (key.trim() !== '') {
-            keys.push(key);
+        if (key && key.trim() !== '') {
+            keys.push(key.trim());
         }
     }
-
-    // Log the number of translation keys found in the file
-    console.log(`Found ${keys.length} translation key(s) in file: ${filePath}`);
 
     return keys;
 }
 
-function checkKeysInTranslationFile(keys, translationFilePath) {
-    console.log(`Checking if translation keys exist in file: ${translationFilePath}`);
+/**
+ * Check if a key exists in translation data (supports nested keys)
+ */
+function keyExistsInTranslations(key, translationData) {
+    const nestedKeys = key.split('.');
+    let currentLevel = translationData;
 
-    const translationContent = fs.readFileSync(translationFilePath, 'utf8');
-    const translationData = yaml.load(translationContent);
-
-    const missingKeys = keys.filter((key) => {
-        const nestedKeys = key.split('.');
-        let currentLevel = translationData;
-
-        for (const nestedKey of nestedKeys) {
-            if (currentLevel && currentLevel.hasOwnProperty(nestedKey)) {
-                currentLevel = currentLevel[nestedKey];
-            } else {
-                return true; // Missing key found
-            }
+    for (const nestedKey of nestedKeys) {
+        if (currentLevel && typeof currentLevel === 'object' && nestedKey in currentLevel) {
+            currentLevel = currentLevel[nestedKey];
+        } else {
+            return false;
         }
+    }
 
-        return false; // All nested keys found
-    });
+    return true;
+}
+
+/**
+ * Check keys against translation file
+ */
+function checkKeysInTranslationFile(keys, translationFilePath) {
+    const translationContent = fs.readFileSync(translationFilePath, 'utf8');
+    const translationData = yaml.load(translationContent) || {};
+
+    const missingKeys = keys.filter((key) => !keyExistsInTranslations(key, translationData));
 
     return missingKeys;
 }
 
-function processDirectory(directoryPath, translationFilePath, silentMode = false) {
-    const files = fs.readdirSync(directoryPath);
+/**
+ * Collect all translation keys from directory
+ */
+function collectKeysFromDirectory(directoryPath) {
+    const allKeys = new Set();
+    const fileStats = { total: 0, withKeys: 0 };
 
-    for (const file of files) {
-        const filePath = path.join(directoryPath, file);
+    function processDirectory(dirPath) {
+        const entries = fs.readdirSync(dirPath, { withFileTypes: true });
 
-        if (fs.statSync(filePath).isDirectory()) {
-            // Recursively process subdirectories
-            processDirectory(filePath, translationFilePath, silentMode);
-        } else if (file.endsWith('.js') || file.endsWith('.hbs')) {
-            console.log(`Checking file: ${filePath}`);
-            // Process JavaScript and Handlebars files
-            const keys = findTranslationKeys(filePath);
-            if (keys.length === 0) {
-                console.log('');
-                continue;
+        for (const entry of entries) {
+            const fullPath = path.join(dirPath, entry.name);
+
+            if (entry.isDirectory()) {
+                processDirectory(fullPath);
+            } else if (entry.name.endsWith('.js') || entry.name.endsWith('.hbs')) {
+                fileStats.total++;
+                const keys = extractTranslationKeys(fullPath);
+                if (keys.length > 0) {
+                    fileStats.withKeys++;
+                    keys.forEach((key) => allKeys.add(key));
+                }
             }
-            const missingKeys = checkKeysInTranslationFile(keys, translationFilePath);
-
-            if (missingKeys.length > 0) {
-                console.error(`File: ${filePath}`);
-                missingKeys.forEach((missingKey) => {
-                    console.error(`🚫 Missing Translation: ${missingKey}`);
-
-                    if (!silentMode) {
-                        throw new Error(`Missing Tranlation: ${missingKey}`);
-                    }
-                });
-            } else {
-                console.log(`All translation keys found in file: ${filePath}`);
-            }
-            console.log('');
         }
     }
+
+    processDirectory(directoryPath);
+    return { keys: Array.from(allKeys), stats: fileStats };
 }
 
-function checkTranslationsInProject(projectPath, translationFilePath, silentMode = false) {
-    console.log(`⏳ Starting translation key check in project: ${projectPath}`);
-    try {
-        processDirectory(projectPath, translationFilePath, silentMode);
-    } catch (error) {
-        throw error;
-    }
-
-    console.log('✅ Translation key check completed.');
-}
-
+/**
+ * Main linting function
+ */
 function lint(options = {}) {
     const silentMode = options.silent === true;
-    const projectPath = path.join(process.cwd(), options.path);
-    const translationFilePath = path.join(process.cwd(), options.translationPath);
+    const projectPath = path.resolve(process.cwd(), options.path);
+    const translationFilePath = path.resolve(process.cwd(), options.translationPath);
 
-    try {
-        checkTranslationsInProject(projectPath, translationFilePath, silentMode);
-    } catch (error) {
-        console.error('💣 Translation key check failed!');
+    // Validate paths
+    if (!fs.existsSync(projectPath)) {
+        console.error(`[Fleetbase] Error: Project path not found: ${projectPath}`);
         process.exit(1);
+    }
+
+    if (!fs.existsSync(translationFilePath)) {
+        console.error(`[Fleetbase] Error: Translation file not found: ${translationFilePath}`);
+        process.exit(1);
+    }
+
+    console.log('\n' + '='.repeat(80));
+    console.log('[Fleetbase] Translation Linter');
+    console.log('='.repeat(80));
+
+    // Collect all keys
+    const { keys, stats } = collectKeysFromDirectory(projectPath);
+    console.log(`[Fleetbase] Scanned ${stats.total} file(s), found ${keys.length} unique translation key(s)`);
+
+    // Check against translation file
+    const translationFileName = path.basename(translationFilePath, path.extname(translationFilePath));
+    const missingKeys = checkKeysInTranslationFile(keys, translationFilePath);
+
+    console.log('');
+    console.log(`[Fleetbase] ${translationFileName}:`);
+
+    if (missingKeys.length > 0) {
+        console.log(`[Fleetbase]   ⚠️  ${missingKeys.length} missing translation(s)`);
+        console.log('');
+
+        // Show all missing keys with indentation
+        missingKeys.forEach((key) => {
+            console.log(`[Fleetbase]      - ${key}`);
+        });
+
+        console.log('');
+        console.log('='.repeat(80) + '\n');
+
+        if (!silentMode) {
+            console.error('[Fleetbase] ❌ Translation validation failed!');
+            process.exit(1);
+        } else {
+            console.log('[Fleetbase] ⚠️  Translation validation completed with warnings (silent mode)');
+        }
+    } else {
+        console.log(`[Fleetbase]   ✓ All translations present`);
+        console.log('');
+        console.log('='.repeat(80) + '\n');
+        console.log('[Fleetbase] ✓ Translation validation passed!');
     }
 }
 
-lint({
-    silent: argv.silent,
-    path: argv.path,
-    translationPath: argv['translation-path'],
-});
+// Run if called directly
+if (require.main === module) {
+    lint({
+        silent: argv.silent,
+        path: argv.path,
+        translationPath: argv['translation-path'],
+    });
+}
 
 module.exports = lint;
